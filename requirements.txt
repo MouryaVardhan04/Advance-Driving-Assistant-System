@@ -1,5 +1,11 @@
 opencv-python
 numpy
 mediapipe
-scipy
 tensorflow
+eel==0.16.0
+pyttsx3==2.90
+SpeechRecognition==3.10.0
+sounddevice==0.4.6
+scipy==1.10.1
+pygame==2.5.0
+PyAudio==0.2.11 
