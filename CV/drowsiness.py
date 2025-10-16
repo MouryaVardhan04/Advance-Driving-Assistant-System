@@ -1,5 +1,3 @@
-# drowsiness.py
-
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -7,21 +5,29 @@ from scipy.spatial import distance as dist
 import time
 from datetime import datetime
 
-# --- Configuration Constants ---
-EAR_THRESHOLD = 0.25      # Eye Aspect Ratio threshold (Eye Closure)
-CONSEC_FRAMES_EAR = 48    # Frames for EAR alert (~1.6 seconds at 30 FPS)
+# --- Configuration Constants (Your new values) ---
+EAR_THRESHOLD = 0.25      
+MAR_THRESHOLD = 0.6       
+TERMINAL_OUTPUT_INTERVAL = 2  
 
-MAR_THRESHOLD = 0.6       # Mouth Aspect Ratio threshold (Yawning)
-CONSEC_FRAMES_MAR = 15    # Frames for MAR alert (~0.5 seconds)
+# --- Time-Based Alert Constants ---
+EAR_DURATION_ALERT_SEC = 2.0 
+MAR_DURATION_ALERT_SEC = 4.0 
 
-TERMINAL_OUTPUT_INTERVAL = 2  # Seconds for terminal output throttling
+# --- Recovery Logic Constants (Your new value) ---
+RECOVERY_TIME_SEC = 20.0 # 20 seconds of alertness to trigger level reduction
 
-# Landmark Indices for Calculations
+# --- Custom Alert Logic Constants (UNCHANGED) ---
+EAR_ALERT_LIMIT_L1 = 3  
+MAR_ALERT_LIMIT_L1 = 2  
+EAR_ALERT_LIMIT_L2 = 5  
+MAR_ALERT_LIMIT_L2 = 3  
+
+# Landmark Indices and Colors (UNCHANGED)
 R_EYE_IDXS = [33, 160, 158, 133, 153, 144] 
 L_EYE_IDXS = [362, 385, 387, 263, 373, 380] 
 MOUTH_IDXS = [61, 291, 0, 17, 14, 37, 267, 40, 270, 310, 317, 82, 312]
 
-# Terminal output colors
 class Colors:
     RED = '\033[91m'
     GREEN = '\033[92m'
@@ -33,23 +39,19 @@ class Colors:
     BOLD = '\033[1m'
     END = '\033[0m'
 
-# --- Helper Functions (Private to the module) ---
+# --- Helper Functions (UNCHANGED) ---
 
 def _eye_aspect_ratio(eye):
-    # Vertical distances (P2-P6 and P3-P5)
     A = dist.euclidean(eye[1], eye[5]) 
     B = dist.euclidean(eye[2], eye[4]) 
-    # Horizontal distance (P1-P4)
     C = dist.euclidean(eye[0], eye[3]) 
     ear = (A + B) / (2.0 * C)
     return ear
 
 def _mouth_aspect_ratio(mouth):
-    # Vertical distances (A, B, C)
     A = dist.euclidean(mouth[1], mouth[11]) 
     B = dist.euclidean(mouth[2], mouth[10])
     C = dist.euclidean(mouth[3], mouth[9])
-    # Horizontal distance (D)
     D = dist.euclidean(mouth[0], mouth[6]) 
     
     mar = (A + B + C) / (3.0 * D)
@@ -61,7 +63,7 @@ class DrowsinessDetector:
     """Detects signs of drowsiness (eye closure and yawning) from a video frame."""
     
     def __init__(self):
-        # Initialize MediaPipe Face Mesh
+        # Initialize MediaPipe Face Mesh (UNCHANGED)
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             max_num_faces=1,
@@ -71,29 +73,90 @@ class DrowsinessDetector:
         )
         self.mp_drawing = mp.solutions.drawing_utils
         
-        # Counters and Status
-        self.EAR_COUNTER = 0
-        self.MAR_COUNTER = 0
+        # --- Time and Event Tracking ---
+        self.EAR_CLOSED_START_TIME = None  
+        self.MAR_YAWN_START_TIME = None    
+        self.EAR_ALERT_CONFIRMED = False   
+        self.MAR_ALERT_CONFIRMED = False
+
+        # Cumulative Counters and Status
+        self.EAR_ALERT_COUNT = 0 
+        self.MAR_ALERT_COUNT = 0 
         self.SLEEPINESS_LEVEL = 0
         self.last_terminal_output = 0
-
-    def _update_sleepiness_level(self, ear_alert, mar_alert):
-        """Combines EAR and MAR alerts into a cumulative sleepiness score."""
-        score = 0
         
-        if ear_alert:
-            score += 2 # Eye closure is the strongest indicator
-        if mar_alert:
-            score += 1
+        # Recovery Timer Tracking (MODIFIED)
+        self.recovery_countdown_active = False
+        # CHANGE: This now tracks the START time of the current continuous ALERT period
+        self.alert_start_time = time.time()
 
-        if score == 3:
-            return 3 # Critical Drowsiness (Eyes Closed + Yawning)
-        elif score == 2:
-            return 2 # Medium Drowsiness (Eyes Closed only)
-        elif score == 1:
-            return 1 # Low Drowsiness (Yawning only)
+        # CHANGE: This stores the last known level > 0 for reference
+        self.last_drowsy_level = 0 
+
+
+    def _update_sleepiness_level(self):
+        """Calculates the sleepiness level based on cumulative EAR/MAR counts."""
+        ear_count = self.EAR_ALERT_COUNT
+        mar_count = self.MAR_ALERT_COUNT
+
+        # Level 3: Deep Sleep (EAR > 5 AND MAR > 3)
+        if ear_count > EAR_ALERT_LIMIT_L2 and mar_count > MAR_ALERT_LIMIT_L2:
+            return 3
+        
+        # Level 2: Medium Sleep (EAR >= 5 AND MAR >= 3)
+        elif ear_count >= EAR_ALERT_LIMIT_L2 and mar_count >= MAR_ALERT_LIMIT_L2:
+            return 2
+        
+        # Level 1: Normal Sleep (EAR >= 3 AND MAR >= 2)
+        elif ear_count >= EAR_ALERT_LIMIT_L1 and mar_count >= MAR_ALERT_LIMIT_L1:
+            return 1
+            
+        # Level 0: Alert
         else:
-            return 0 # Alert
+            return 0 
+
+    def _apply_recovery_logic(self, current_level, avg_ear, mar):
+        """
+        Decrements EAR and MAR counts by 1 after 20 seconds of continuous alertness.
+        """
+        
+        current_time = time.time()
+        
+        # Check if the user is displaying non-drowsy metrics in the current frame
+        is_frame_alert = (avg_ear >= EAR_THRESHOLD) and (mar <= MAR_THRESHOLD)
+        
+        # Condition 1: Drowsy State (Level > 0 OR frame metrics are bad)
+        if current_level > 0:
+            # Drowsiness is active. Stop any recovery countdown.
+            self.recovery_countdown_active = False
+            self.alert_start_time = current_time # Keep tracking the LAST moment of Drowsiness
+            self.last_drowsy_level = current_level
+            
+        # Condition 2: Alert Frame (Level 0) AND needs recovery (counts > 0)
+        elif is_frame_alert and (self.EAR_ALERT_COUNT > 0 or self.MAR_ALERT_COUNT > 0):
+            
+            # Start the countdown if it hasn't started yet
+            if not self.recovery_countdown_active:
+                self.recovery_countdown_active = True
+                self.alert_start_time = current_time # START the recovery timer NOW
+            
+            # Check if 20 seconds of continuous alertness have passed
+            if self.recovery_countdown_active and (current_time - self.alert_start_time >= RECOVERY_TIME_SEC):
+                
+                # --- APPLY SIMPLE DECREMENT ---
+                self.EAR_ALERT_COUNT = max(0, self.EAR_ALERT_COUNT - 1)
+                self.MAR_ALERT_COUNT = max(0, self.MAR_ALERT_COUNT - 1)
+                
+                print(f"{Colors.GREEN}[{datetime.now().strftime('%H:%M:%S')}] 🧠 RECOVERY: Alertness held for {RECOVERY_TIME_SEC}s. Counts decremented by 1. New Counts (E:{self.EAR_ALERT_COUNT}, M:{self.MAR_ALERT_COUNT}){Colors.END}")
+
+                # Reset timer to begin the next 20-second recovery cycle immediately
+                self.alert_start_time = current_time 
+        
+        # Condition 3: Alert Frame (Level 0) AND counts are 0 (Fully Recovered)
+        else:
+            self.recovery_countdown_active = False # Ensure countdown is off
+            self.alert_start_time = current_time # Keep timer reset
+
 
     def _print_terminal_alert(self, level, ear, mar):
         """Prints simplified, colored terminal output for drowsiness alerts."""
@@ -102,22 +165,49 @@ class DrowsinessDetector:
         # Throttling Logic: Only print detailed alerts or 'Alert' status after the interval
         if level > 0 or time.time() - self.last_terminal_output >= TERMINAL_OUTPUT_INTERVAL:
             
+            common_stats = f" | Counts (EAR: {self.EAR_ALERT_COUNT}, MAR: {self.MAR_ALERT_COUNT}) | Metrics (EAR: {ear:.3f}, MAR: {mar:.3f})"
+            
             if level == 3:
-                print(f"{Colors.RED}{Colors.BOLD}[{timestamp}] 🚨 CRITICAL DROWSINESS DETECTED! 🚨{Colors.END}")
-                print(f"{Colors.RED}   Level: HIGH (3) - Eyes: {ear:.3f}, Mouth: {mar:.3f}{Colors.END}")
-                print(f"{Colors.RED}   ⚠️  IMMEDIATE ATTENTION REQUIRED! ⚠️{Colors.END}")
+                print(f"{Colors.RED}{Colors.BOLD}[{timestamp}] 🚨 DEEP SLEEP DETECTED! (Level 3) 🚨{Colors.END}")
+                print(f"{Colors.RED}   ⚠️  IMMEDIATE ATTENTION REQUIRED! ⚠️{common_stats}{Colors.END}")
             elif level == 2:
-                print(f"{Colors.YELLOW}{Colors.BOLD}[{timestamp}] ⚠️  DROWSY DETECTED! ⚠️{Colors.END}")
-                print(f"{Colors.YELLOW}   Level: MEDIUM (2) - Eyes: {ear:.3f}, Mouth: {mar:.3f}{Colors.END}")
-                print(f"{Colors.YELLOW}   💤 Consider taking a break! 💤{Colors.END}")
+                print(f"{Colors.YELLOW}{Colors.BOLD}[{timestamp}] ⚠️  MEDIUM SLEEP DETECTED! (Level 2) ⚠️{Colors.END}")
+                print(f"{Colors.YELLOW}   💤 Consider taking a break! 💤{common_stats}{Colors.END}")
             elif level == 1:
-                print(f"{Colors.CYAN}[{timestamp}] ⚡ FATIGUE WARNING ⚡{Colors.END}")
-                print(f"{Colors.CYAN}   Level: LOW (1) - Eyes: {ear:.3f}, Mouth: {mar:.3f}{Colors.END}")
+                print(f"{Colors.CYAN}[{timestamp}] 😴 NORMAL SLEEP DETECTED! (Level 1){Colors.END}")
+                print(f"{Colors.CYAN}   Time to rest.{common_stats}{Colors.END}")
             else:
                 # 'Alert' message output
-                print(f"{Colors.GREEN}[{timestamp}] ✅ Alert - Eyes: {ear:.3f}, Mouth: {mar:.3f}{Colors.END}")
-            
+                if self.recovery_countdown_active:
+                    time_left = max(0, RECOVERY_TIME_SEC - (time.time() - self.alert_start_time))
+                    print(f"{Colors.GREEN}[{timestamp}] ✅ Alert - Level 0 (Recovery Time Left: {time_left:.0f}s){common_stats}{Colors.END}")
+                else:
+                    print(f"{Colors.GREEN}[{timestamp}] ✅ Fully Alert{common_stats}{Colors.END}")
+
             self.last_terminal_output = time.time()
+
+    def _draw_display_status(self, image, img_w, ear_metric, mar_metric):
+        """Draws the status box on the image."""
+        
+        status_color = (0, 255, 0)
+        status_text = f"LEVEL 0: ALERT"
+
+        if self.SLEEPINESS_LEVEL == 3:
+            status_text = "LEVEL 3: DEEP SLEEP"
+            status_color = (0, 0, 255) # RED (BGR)
+        elif self.SLEEPINESS_LEVEL == 2:
+            status_text = "LEVEL 2: MEDIUM SLEEP"
+            status_color = (0, 165, 255) # ORANGE
+        elif self.SLEEPINESS_LEVEL == 1:
+            status_text = "LEVEL 1: NORMAL SLEEP"
+            status_color = (0, 255, 255) # YELLOW
+        
+        # Draw Status
+        cv2.putText(image, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+        
+        # Draw Counts
+        cv2.putText(image, f"EAR Count: {self.EAR_ALERT_COUNT}", (img_w - 220, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(image, f"MAR Count: {self.MAR_ALERT_COUNT}", (img_w - 220, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
 
     def process_frame(self, image):
@@ -131,8 +221,9 @@ class DrowsinessDetector:
         image.flags.writeable = True
         
         img_h, img_w, _ = image.shape
-        ear_alert, mar_alert = False, False
+        ear_alert_instant, mar_alert_instant = False, False 
         avg_ear, mar = 0, 0
+        current_time = time.time()
         
         # Reset alert display area
         cv2.rectangle(image, (0, 0), (img_w, 80), (0, 0, 0), -1) 
@@ -149,7 +240,6 @@ class DrowsinessDetector:
                 connection_drawing_spec=self.mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=1, circle_radius=1)
             )
             
-            # Helper to convert normalized landmark to pixel coordinates
             def get_coords(idxs):
                 coords = []
                 for i in idxs:
@@ -157,78 +247,78 @@ class DrowsinessDetector:
                     coords.append((int(lm.x * img_w), int(lm.y * img_h)))
                 return np.array(coords)
 
-            # 1. EYE ASPECT RATIO (EAR)
+            # 1. EYE ASPECT RATIO (EAR) - DURATION CHECK
             left_ear = _eye_aspect_ratio(get_coords(L_EYE_IDXS))
             right_ear = _eye_aspect_ratio(get_coords(R_EYE_IDXS))
             avg_ear = (left_ear + right_ear) / 2.0
             
             if avg_ear < EAR_THRESHOLD:
-                self.EAR_COUNTER += 1
-                if self.EAR_COUNTER >= CONSEC_FRAMES_EAR:
-                    ear_alert = True
+                if self.EAR_CLOSED_START_TIME is None:
+                    self.EAR_CLOSED_START_TIME = current_time
+                
+                if (current_time - self.EAR_CLOSED_START_TIME) >= EAR_DURATION_ALERT_SEC and not self.EAR_ALERT_CONFIRMED:
+                    self.EAR_ALERT_COUNT += 1
+                    self.EAR_ALERT_CONFIRMED = True
+                    ear_alert_instant = True
             else:
-                self.EAR_COUNTER = 0
+                self.EAR_CLOSED_START_TIME = None
+                self.EAR_ALERT_CONFIRMED = False 
 
-            # 2. MOUTH ASPECT RATIO (MAR)
+            # 2. MOUTH ASPECT RATIO (MAR) - DURATION CHECK
             mouth_coords = get_coords(MOUTH_IDXS)
             mar = _mouth_aspect_ratio(mouth_coords)
 
             if mar > MAR_THRESHOLD:
-                self.MAR_COUNTER += 1
-                if self.MAR_COUNTER >= CONSEC_FRAMES_MAR:
-                    mar_alert = True
+                if self.MAR_YAWN_START_TIME is None:
+                    self.MAR_YAWN_START_TIME = current_time
+
+                if (current_time - self.MAR_YAWN_START_TIME) >= MAR_DURATION_ALERT_SEC and not self.MAR_ALERT_CONFIRMED:
+                    self.MAR_ALERT_COUNT += 1
+                    self.MAR_ALERT_CONFIRMED = True
+                    mar_alert_instant = True
             else:
-                self.MAR_COUNTER = 0
+                self.MAR_YAWN_START_TIME = None
+                self.MAR_ALERT_CONFIRMED = False 
 
-            # Draw indicators (colors change on alert)
-            cv2.polylines(image, [get_coords(L_EYE_IDXS)], True, (255, 0, 255) if ear_alert else (0, 255, 0), 2)
-            cv2.polylines(image, [get_coords(R_EYE_IDXS)], True, (255, 0, 255) if ear_alert else (0, 255, 0), 2)
-            cv2.polylines(image, [mouth_coords], True, (0, 0, 255) if mar_alert else (0, 255, 255), 2)
+            # Draw indicators (colors change on instant alert)
+            cv2.polylines(image, [get_coords(L_EYE_IDXS)], True, (255, 0, 255) if ear_alert_instant else (0, 255, 0), 2)
+            cv2.polylines(image, [get_coords(R_EYE_IDXS)], True, (255, 0, 255) if ear_alert_instant else (0, 255, 0), 2)
+            cv2.polylines(image, [mouth_coords], True, (0, 0, 255) if mar_alert_instant else (0, 255, 255), 2)
 
-            # 3. DECIDE SLEEPINESS LEVEL
-            self.SLEEPINESS_LEVEL = self._update_sleepiness_level(ear_alert, mar_alert)
+            # 3. DECIDE SLEEPINESS LEVEL AND APPLY RECOVERY
+            new_level = self._update_sleepiness_level()
+            self._apply_recovery_logic(new_level, avg_ear, mar) # Pass metrics for recovery check
+            # IMPORTANT: Get the FINAL level after recovery has potentially adjusted the counts
+            self.SLEEPINESS_LEVEL = self._update_sleepiness_level() 
 
             # --- Display Logic ---
-            status_color = (0, 255, 0)
-            status_text = "ALERT"
-            
-            if self.SLEEPINESS_LEVEL == 3:
-                status_text = "CRITICAL DROWSINESS (EAR+MAR)"
-                status_color = (0, 0, 255) # RED
-            elif self.SLEEPINESS_LEVEL == 2:
-                status_text = "DROWSY - EYES CLOSED"
-                status_color = (0, 165, 255) # ORANGE
-            elif self.SLEEPINESS_LEVEL == 1:
-                status_text = "FATIGUE - YAWN DETECTED"
-                status_color = (0, 255, 255) # YELLOW
-            
-            # Draw Status
-            cv2.putText(image, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
-            
-            # Draw Metrics
-            cv2.putText(image, "EAR: {:.2f}".format(avg_ear), (img_w - 180, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            cv2.putText(image, "MAR: {:.2f}".format(mar), (img_w - 180, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            
-            # Draw Counters
-            cv2.putText(image, f"EAR Counter: {self.EAR_COUNTER}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(image, f"MAR Counter: {self.MAR_COUNTER}", (140, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            self._draw_display_status(image, img_w, avg_ear, mar)
 
             # Terminal Output
             self._print_terminal_alert(self.SLEEPINESS_LEVEL, avg_ear, mar)
             
         else:
-            # No face detected
+            # No face detected - reset all timers and instant flags
+            self.EAR_CLOSED_START_TIME = None
+            self.MAR_YAWN_START_TIME = None
+            self.EAR_ALERT_CONFIRMED = False
+            self.MAR_ALERT_CONFIRMED = False
+            
+            # If face is lost, interrupt the recovery countdown
+            if self.recovery_countdown_active:
+                self.recovery_countdown_active = False 
+            self.alert_start_time = current_time 
+
             cv2.putText(image, "NO FACE DETECTED", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             
-            # Throttle "No face detected" message
-            if time.time() - self.last_terminal_output >= TERMINAL_OUTPUT_INTERVAL:
+            if current_time - self.last_terminal_output >= TERMINAL_OUTPUT_INTERVAL:
                 print(f"{Colors.RED}[{datetime.now().strftime('%H:%M:%S')}] ❌ No face detected{Colors.END}")
-                self.last_terminal_output = time.time()
+                self.last_terminal_output = current_time
                 
-        return image, self.SLEEPINESS_LEVEL, True # Success (frame processed)
+        return image, self.SLEEPINESS_LEVEL, True 
 
-# --- Primary Application Entry Point ---
+# --- Primary Application Entry Point (UNCHANGED) ---
 
 def start_application():
     """Initializes and runs the main video processing loop."""
@@ -239,7 +329,8 @@ def start_application():
 
     # 2. Startup Messages
     print(f"{Colors.BOLD}{Colors.BLUE}🚀 Starting Simplified Drowsiness Detector (EAR + MAR) 🚀{Colors.END}")
-    print(f"{Colors.CYAN}EAR/MAR Thresholds: {EAR_THRESHOLD} / {MAR_THRESHOLD}{Colors.END}")
+    print(f"{Colors.CYAN}EAR/MAR Thresholds: {EAR_THRESHOLD} / {MAR_THRESHOLD} | EAR Duration: {EAR_DURATION_ALERT_SEC}s, MAR Duration: {MAR_DURATION_ALERT_SEC}s{Colors.END}")
+    print(f"{Colors.GREEN}Recovery Logic: Counts decrement by 1 after {RECOVERY_TIME_SEC} seconds of alertness.{Colors.END}")
     print(f"{Colors.GREEN}Press 'q' to quit the application{Colors.END}")
     print(f"{Colors.MAGENTA}{'='*60}{Colors.END}")
     
@@ -254,21 +345,13 @@ def start_application():
             continue
         
         try:
-            # Flip the image horizontally for a more natural selfie-view
             image = cv2.flip(image, 1)
-            
-            # Process the frame using the detector object
             processed_image, sleepiness_level, processed = detector.process_frame(image)
-
-            # Display the resulting frame
             cv2.imshow('Simplified Drowsiness Detector', processed_image)
         except Exception as e:
-            # Catch exceptions during frame processing (e.g., if MediaPipe fails)
             print(f"{Colors.RED}An error occurred during frame processing: {e}{Colors.END}")
-            # Do not break here to allow recovery, but you could if errors are persistent
             pass
 
-        # Break the loop if 'q' is pressed
         if cv2.waitKey(5) & 0xFF == ord('q'):
             print(f"{Colors.GREEN}👋 Application terminated by user{Colors.END}")
             break
@@ -277,3 +360,6 @@ def start_application():
     cap.release()
     cv2.destroyAllWindows()
     print(f"{Colors.BLUE}🔚 Drowsiness detector stopped{Colors.END}")
+
+if __name__ == '__main__':
+    start_application()

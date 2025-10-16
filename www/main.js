@@ -1,26 +1,6 @@
-// main.js
-
-// 💡 Define showHood BEFORE document.ready so Python can call it immediately
-eel.expose(showHood);
-function showHood() {
-    console.log("Python called showHood: Switching to Hood/Oval view.");
-    // 💡 FIX: Hide SiriWave and show Oval
-    $("#SiriWave").hide(); 
-    $("#Oval").show();   
-    
-    // Reset buttons
-    $("#MicBtn").show();
-    $("#SendBtn").hide();
-}
-
-
 $(document).ready(function () {
 
     eel.init()()
-
-    // Ensure initial state is correct (Oval visible, SiriWave hidden)
-    $("#Oval").show();
-    $("#SiriWave").hide();
 
     $('.text').textillate({
         loop: true,
@@ -61,73 +41,72 @@ $(document).ready(function () {
     });
 
     // mic button click event
-    $("#MicBtn").click(function () { 
-        // 💡 FIX: Use .show()/.hide() for consistency
-        $("#Oval").hide();
-        $("#SiriWave").show();
-        
-        eel.playAssistantSound();
-        eel.takecommand()();
-    });
+    // 💡 NOTE: This handler is now redundant as controller.js handles the click, 
+    // but we keep the keyup handler.
 
-
+    // 🌟 FIX: Key handler was calling eel.takecommand() twice
     function doc_keyUp(e) {
-        // Mac Command+J (metaKey for Command key on Mac)
-        if (e.key === 'j' && e.metaKey) {
+        // this would test for whichever key is 40 (down arrow) and the ctrl key at the same time
+
+        if (e.key === 'j' && e.metaKey) { // For Mac: Command + J
+            eel.playAssistantSound()
             $("#Oval").hide();
             $("#SiriWave").show();
-            eel.playAssistantSound();
-            eel.takecommand()();
+            eel.takecommand()()
         }
     }
     document.addEventListener('keyup', doc_keyUp, false);
 
-    // to play assistant 
+    // to play assisatnt 
     function PlayAssistant(message) {
 
         if (message != "") {
 
-            // Switch to SiriWave display when manually submitting command
             $("#Oval").hide();
             $("#SiriWave").show();
-            
+            // Call allCommands for text input
             eel.allCommands(message);
-            
             $("#chatbox").val("")
-            ShowHideButton("")
+            $("#MicBtn").attr('hidden', false);
+            $("#SendBtn").attr('hidden', true);
+
         }
 
     }
 
     // toogle fucntion to hide and display mic and send button 
     function ShowHideButton(message) {
-        if (message.length === 0) {
-            $("#MicBtn").show(); // Show mic
-            $("#SendBtn").hide(); // Hide send
+        if (message.length == 0) {
+            $("#MicBtn").attr('hidden', false);
+            $("#SendBtn").attr('hidden', true);
         }
         else {
-            $("#MicBtn").hide(); // Hide mic
-            $("#SendBtn").show(); // Show send
+            $("#MicBtn").attr('hidden', true);
+            $("#SendBtn").attr('hidden', false);
         }
     }
 
     // key up event handler on text box
     $("#chatbox").keyup(function () {
+
         let message = $("#chatbox").val();
         ShowHideButton(message)
+    
     });
     
     // send button event handler
     $("#SendBtn").click(function () {
+    
         let message = $("#chatbox").val()
         PlayAssistant(message)
+    
     });
     
 
     // enter press event handler on chat box
     $("#chatbox").keypress(function (e) {
         key = e.which;
-        if (key === 13) {
+        if (key == 13) {
             let message = $("#chatbox").val()
             PlayAssistant(message)
         }

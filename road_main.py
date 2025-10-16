@@ -5,7 +5,7 @@ from keras.models import load_model
 
 
 class RoadSignDetector:
-    def __init__(self, model_path='Models/model.h5', label_file='labels.csv', video_path='roadsign.webm'):
+    def __init__(self, model_path='Models/sign_model.h5', label_file='labels.csv', video_path='roadsign.webm'):
         self.model_path = model_path
         self.label_file = label_file
         self.video_path = video_path
