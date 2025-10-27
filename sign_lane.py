@@ -9,6 +9,8 @@ from PerspectiveTransformation import PerspectiveTransformation
 from LaneLines import LaneLines
 from keras.models import load_model
 
+# combination of road_sign detection and lane detection
+
 class FindLaneLines:
     def __init__(self):
         self.calibration = CameraCalibration('camera_cal', 9, 6)
