@@ -1,8 +1,6 @@
 import cv2
 import numpy as np
 import matplotlib.image as mpimg
-from ultralytics import YOLO
-import supervision as sv
 
 def hist(img):
     bottom_half = img[img.shape[0]//2:,:]
@@ -11,7 +9,7 @@ def hist(img):
 class LaneLines:
     """ Class containing information about detected lane lines."""
 
-    def __init__(self, model_path="best.pt", confidence_threshold=0.10):
+    def __init__(self):
         """Init Lanelines."""
         self.left_fit = None
         self.right_fit = None
@@ -22,9 +20,6 @@ class LaneLines:
         self.clear_visibility = True
         self.dir = []
         
-        # Store original color frame for pothole detection
-        self.original_img = None
-        
         # Load and normalize direction images
         self.left_curve_img = mpimg.imread('left_turn.png')
         self.right_curve_img = mpimg.imread('right_turn.png')
@@ -34,31 +29,10 @@ class LaneLines:
         self.right_curve_img = cv2.normalize(src=self.right_curve_img, dst=None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
         self.keep_straight_img = cv2.normalize(src=self.keep_straight_img, dst=None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
-        # Lane validity flag and thresholds
-        self.lanes_valid = False
-        self.min_lane_pixels = 1200   # minimum number of pixels per side to consider detection reliable
-        self.min_lane_width = 200     # minimum expected lane width in pixels at bottom of image
-        self.max_lane_width = 1000    # maximum expected lane width in pixels at bottom of image
-
         # HYPERPARAMETERS
         self.nwindows = 9
         self.margin = 80   # Reduced from 100 to 80 for narrower lane detection
         self.minpix = 50
-        
-        # Initialize Pothole Detection Model
-        try:
-            print(f"Loading pothole detection model from {model_path}...")
-            self.pothole_model = YOLO(model_path)
-            self.confidence_threshold = confidence_threshold
-            self.box_annotator = sv.BoxAnnotator(
-                thickness=2,
-                color=sv.Color.from_hex("#0055FF")
-            )
-            print("Pothole detection model loaded successfully.")
-        except Exception as e:
-            print(f"WARNING: Could not load pothole detection model: {e}")
-            self.pothole_model = None
-            self.box_annotator = None
 
     def forward(self, img):
         """Take a image and detect lane lines."""
@@ -74,10 +48,6 @@ class LaneLines:
         condy = (topleft[1] <= self.nonzeroy) & (self.nonzeroy <= bottomright[1])
         return self.nonzerox[condx&condy], self.nonzeroy[condx&condy]
 
-    def set_original_frame(self, original_img):
-        """Store the original color frame for pothole detection."""
-        self.original_img = original_img.copy()
-    
     def extract_features(self, img):
         """ Extract features from a binary image."""
         self.img = img
@@ -132,9 +102,8 @@ class LaneLines:
             self.right_fit = np.polyfit(righty, rightx, 2)
             
         if self.left_fit is None or self.right_fit is None:
-            # Lane detection failed - mark invalid and return blank overlay (will be skipped in sign_lane.py)
-            self.lanes_valid = False
-            return np.dstack((img, img, img))
+             print("Warning: Polyfit failed. Not drawing lines on this frame.")
+             return np.dstack((img, img, img))
 
         maxy = img.shape[0] - 1
         miny = img.shape[0] // 3
@@ -156,28 +125,6 @@ class LaneLines:
             y = int(y)
             cv2.line(out_img, (l, y), (r, y), (0, 255, 0))
 
-        # Quick sanity checks to ensure a reliable lane detection before returning overlay
-        try:
-            left_count = len(lefty)
-            right_count = len(righty)
-
-            # Estimate lane positions at bottom of image to compute lane width
-            xl = np.dot(self.left_fit, [img.shape[0]**2, img.shape[0], 1])
-            xr = np.dot(self.right_fit, [img.shape[0]**2, img.shape[0], 1])
-            lane_width = abs(xr - xl)
-
-            if (left_count >= self.min_lane_pixels and right_count >= self.min_lane_pixels and
-                    lane_width >= self.min_lane_width and lane_width <= self.max_lane_width):
-                self.lanes_valid = True
-            else:
-                self.lanes_valid = False
-        except Exception:
-            self.lanes_valid = False
-
-        # If lanes are considered valid, proceed normally; otherwise return blank overlay
-        if not self.lanes_valid:
-            return np.dstack((img, img, img))
-
         lR, rR, pos = self.measure_curvature()
 
         return out_img
@@ -186,55 +133,9 @@ class LaneLines:
         """
         Overlays the directional widget, curvature, and position on the image.
         Content is stacked vertically within the widget box.
-        Also runs pothole detection on the original color frame if available.
         """
         np.set_printoptions(precision=6, suppress=True)
-        
-        # Run pothole detection on original color frame if available
-        if self.pothole_model is not None and self.original_img is not None:
-            try:
-                # Run YOLO inference on original color frame
-                results = self.pothole_model(self.original_img, conf=self.confidence_threshold, verbose=False)[0]
-                
-                # Convert ultralytics results -> supervision Detections
-                detections = sv.Detections.from_ultralytics(results)
-                
-                # Display pothole bounding boxes only when more than 2 potholes are detected
-                if len(detections) > 2:
-                    # Build labels
-                    try:
-                        labels = [
-                            f"{results.names[int(cls)]}: {float(conf):.2f}"
-                            for conf, cls in zip(detections.confidence, detections.class_id)
-                        ]
-                    except Exception:
-                        labels = []
-                        for det in detections:
-                            try:
-                                conf = float(det[4])
-                                cls = int(det[5])
-                                labels.append(f"{results.names[cls]}: {conf:.2f}")
-                            except Exception:
-                                labels.append("obj")
-                    
-                    # Annotate potholes on the output image
-                    out_img = self.box_annotator.annotate(out_img, detections, labels)
-                    
-                    # Draw warning text
-                    cv2.putText(
-                        out_img,
-                        "POTHOLE DETECTED!",
-                        (out_img.shape[1] // 2 - 150, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1.0,
-                        (0, 0, 255),
-                        3
-                    )
-            except Exception as e:
-                print(f"Pothole detection error: {e}")
-        
-        # Only plot lane widget and related info when lanes are validated
-        if not getattr(self, 'lanes_valid', False):
+        if self.left_fit is None or self.right_fit is None:
             return out_img 
 
         lR, rR, pos = self.measure_curvature()

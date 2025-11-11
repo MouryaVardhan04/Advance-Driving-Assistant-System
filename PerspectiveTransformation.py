@@ -12,14 +12,15 @@ class PerspectiveTransformation:
     """
     def __init__(self):
         """Init PerspectiveTransformation."""
-        self.src = np.float32([(550, 460),     # top-left
-                               (150, 720),     # bottom-left
-                               (1200, 720),    # bottom-right
-                               (770, 460)])    # top-right
-        self.dst = np.float32([(100, 0),
-                               (100, 720),
-                               (1100, 720),
-                               (1100, 0)])
+        # Narrower source points for more realistic road width
+        self.src = np.float32([(600, 460),     # top-left (moved inward)
+                               (200, 720),     # bottom-left (moved inward)
+                               (1080, 720),    # bottom-right (moved inward)
+                               (680, 460)])    # top-right (moved inward)
+        self.dst = np.float32([(200, 0),       # Narrower destination
+                               (200, 720),
+                               (1000, 720),
+                               (1000, 0)])
         self.M = cv2.getPerspectiveTransform(self.src, self.dst)
         self.M_inv = cv2.getPerspectiveTransform(self.dst, self.src)
 

@@ -3,32 +3,43 @@ import numpy as np
 import mediapipe as mp
 from scipy.spatial import distance as dist
 import time
-from datetime import datetime
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.image import img_to_array
-import os # For safer path construction
-# comination of drowziness and the emotion 
-# ==============================================================================
-# --- DROWSINESS DETECTION COMPONENTS (Constants, Functions, Class) ---
-# ==============================================================================
+from datetime import datetime as dt 
+import os 
+# import pyttsx3 # REMOVED: No more text-to-speech
 
-# --- Configuration Constants ---
+# *** NEW MP3 LIBRARIES ***
+from pydub import AudioSegment
+import simpleaudio as sa
+# *************************
+
+import eel 
+import requests 
+
+# ====================================================================
+# 🔥 CRITICAL: Removed GEMINI API Key and URL constants! 🔥
+# ====================================================================
+
+# --- GLOBAL STATE ---
+CURRENT_PLAYBACK = None 
+PRELOADED_AUDIO = None # Global to store decoded audio
+# --------------------
+
+# --- CONFIGURATION CONSTANTS ---
 EAR_THRESHOLD = 0.25      
 MAR_THRESHOLD = 0.6       
 TERMINAL_OUTPUT_INTERVAL = 2  
-
-# --- Time-Based Alert Constants ---
-EAR_DURATION_ALERT_SEC = 2.0 
+# *** MODIFIED FOR INSTANT RESPONSE (0.5 seconds) ***
+EAR_DURATION_ALERT_SEC = 1.5
 MAR_DURATION_ALERT_SEC = 4.0 
-
-# --- Recovery Logic Constants ---
 RECOVERY_TIME_SEC = 20.0 
-
-# --- Custom Alert Logic Constants ---
 EAR_ALERT_LIMIT_L1 = 3  
 MAR_ALERT_LIMIT_L1 = 2  
 EAR_ALERT_LIMIT_L2 = 5  
 MAR_ALERT_LIMIT_L2 = 3  
+
+# --- AUDIO ALARM CONFIGURATION (Now supports MP3) ---
+ALARM_SOUND_FILE = 'beep.mp3' 
+# -------------------------------------
 
 # Landmark Indices
 R_EYE_IDXS = [33, 160, 158, 133, 153, 144] 
@@ -46,7 +57,75 @@ class Colors:
     BOLD = '\033[1m'
     END = '\033[0m'
 
-# --- Helper Functions ---
+# --- NEW: AUDIO PRELOAD FUNCTION ---
+def preload_audio(filename):
+    """Loads and decodes the audio file once at startup."""
+    global PRELOADED_AUDIO
+    try:
+        if not os.path.exists(filename):
+            print(f"{Colors.RED}[AUDIO ALARM] Preload Error: File not found at {filename}.{Colors.END}")
+            return False
+        
+        # Load and decode the audio file once at startup (Expensive operation done only once)
+        PRELOADED_AUDIO = AudioSegment.from_file(filename)
+        print(f"[AUDIO ALARM] Successfully preloaded {filename}.")
+        return True
+    except Exception as e:
+        # Check if error is related to FFmpeg
+        if "No such file or directory" in str(e) and ("ffmpeg" in str(e).lower() or "ffprobe" in str(e).lower()):
+             print(f"{Colors.RED}[AUDIO ALARM] Preload FAILED: FFmpeg command not found. Install FFmpeg.{Colors.END}")
+        else:
+             print(f"{Colors.RED}[AUDIO ALARM] Preload FAILED: Check FFmpeg installation/permissions. Error: {e}{Colors.END}")
+        return False
+
+
+# --- UPDATED: AUDIO UTILITY FUNCTION (MP3-Compatible, Uses Preloaded Data) ---
+def play_sound_alarm():
+    """Plays the pre-loaded MP3 audio buffer, non-blocking."""
+    global CURRENT_PLAYBACK, PRELOADED_AUDIO
+    
+    if PRELOADED_AUDIO is None:
+        return
+
+    # Stop any currently playing sound before starting a new one
+    stop_sound_alarm()
+    
+    try:
+        audio = PRELOADED_AUDIO
+        
+        # Play the audio buffer (Fast operation)
+        CURRENT_PLAYBACK = sa.play_buffer(
+            audio.raw_data,
+            num_channels=audio.channels,
+            bytes_per_sample=audio.sample_width,
+            sample_rate=audio.frame_rate
+        )
+        
+    except Exception as e:
+        print(f"{Colors.RED}[AUDIO ALARM] Failed to play sound: {e}{Colors.END}")
+
+
+def stop_sound_alarm():
+    """Stops the currently playing sound (if any)."""
+    global CURRENT_PLAYBACK
+    if CURRENT_PLAYBACK is not None and CURRENT_PLAYBACK.is_playing():
+        CURRENT_PLAYBACK.stop()
+        # Removed print for slight performance gain
+
+# --- END AUDIO UTILITY FUNCTION ---
+
+def safe_eel_call(func_name, *args):
+    """Safely call Eel functions, with fallback if not available"""
+    if func_name == "DisplayMessage":
+        print(f"[Eel] DisplayMessage: {args[0]}") 
+    elif func_name == "setMicState":
+        print(f"[Eel] Setting Mic State to: {args[0]}")
+    elif func_name == "showHood":
+        print("[Eel] Calling showHood")
+    else:
+        print(f"[Eel] Calling {func_name}")
+
+# --- HELPER FUNCTIONS (Kept) ---
 def _eye_aspect_ratio(eye):
     A = dist.euclidean(eye[1], eye[5]) 
     B = dist.euclidean(eye[2], eye[4]) 
@@ -62,7 +141,7 @@ def _mouth_aspect_ratio(mouth):
     mar = (A + B + C) / (3.0 * D)
     return mar
 
-# --- Drowsiness Detector Class ---
+# --- DROWSINESS DETECTOR CLASS ---
 class DrowsinessDetector:
     """Detects signs of drowsiness (eye closure and yawning) from a video frame."""
     
@@ -99,19 +178,17 @@ class DrowsinessDetector:
         ear_count = self.EAR_ALERT_COUNT
         mar_count = self.MAR_ALERT_COUNT
 
-        if ear_count > EAR_ALERT_LIMIT_L2 and mar_count > MAR_ALERT_LIMIT_L2:
+        if ear_count > EAR_ALERT_LIMIT_L2 or mar_count > MAR_ALERT_LIMIT_L2:
             return 3
-        elif ear_count >= EAR_ALERT_LIMIT_L2 and mar_count >= MAR_ALERT_LIMIT_L2:
+        elif ear_count >= EAR_ALERT_LIMIT_L2 or mar_count >= MAR_ALERT_LIMIT_L2:
             return 2
-        elif ear_count >= EAR_ALERT_LIMIT_L1 and mar_count >= MAR_ALERT_LIMIT_L1:
+        elif ear_count >= EAR_ALERT_LIMIT_L1 or mar_count >= MAR_ALERT_LIMIT_L1:
             return 1
         else:
             return 0 
 
     def _apply_recovery_logic(self, current_level, avg_ear, mar):
-        """
-        Decrements EAR and MAR counts by 1 after 20 seconds of continuous alertness.
-        """
+        """Decrements EAR and MAR counts by 1 after 20 seconds of continuous alertness."""
         current_time = time.time()
         is_frame_alert = (avg_ear >= EAR_THRESHOLD) and (mar <= MAR_THRESHOLD)
         
@@ -129,7 +206,7 @@ class DrowsinessDetector:
                 self.EAR_ALERT_COUNT = max(0, self.EAR_ALERT_COUNT - 1)
                 self.MAR_ALERT_COUNT = max(0, self.MAR_ALERT_COUNT - 1)
                 
-                print(f"{Colors.GREEN}[{datetime.now().strftime('%H:%M:%S')}] 🧠 RECOVERY: Alertness held for {RECOVERY_TIME_SEC}s. Counts decremented by 1. New Counts (E:{self.EAR_ALERT_COUNT}, M:{self.MAR_ALERT_COUNT}){Colors.END}")
+                print(f"{Colors.GREEN}[{dt.now().strftime('%H:%M:%S')}] 🧠 RECOVERY: Alertness held for {RECOVERY_TIME_SEC}s. Counts decremented by 1. New Counts (E:{self.EAR_ALERT_COUNT}, M:{self.MAR_ALERT_COUNT}){Colors.END}")
 
                 self.alert_start_time = current_time 
         else:
@@ -138,17 +215,17 @@ class DrowsinessDetector:
 
     def _print_terminal_alert(self, level, ear, mar):
         """Prints simplified, colored terminal output for drowsiness alerts."""
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = dt.now().strftime("%H:%M:%S")
         
         if level > 0 or time.time() - self.last_terminal_output >= TERMINAL_OUTPUT_INTERVAL:
             common_stats = f" | Counts (EAR: {self.EAR_ALERT_COUNT}, MAR: {self.MAR_ALERT_COUNT}) | Metrics (EAR: {ear:.3f}, MAR: {mar:.3f})"
             
             if level == 3:
-                print(f"{Colors.RED}{Colors.BOLD}[{timestamp}] 🚨 DEEP SLEEP DETECTED! (Level 3) 🚨{Colors.END}")
+                print(f"{Colors.RED}{Colors.BOLD}[{timestamp}] 🚨 DEEP SLEEP DETECTED! (Level 3) 🚨{common_stats}{Colors.END}")
             elif level == 2:
-                print(f"{Colors.YELLOW}{Colors.BOLD}[{timestamp}] ⚠️  MEDIUM SLEEP DETECTED! (Level 2) ⚠️{Colors.END}")
+                print(f"{Colors.YELLOW}{Colors.BOLD}[{timestamp}] ⚠️  MEDIUM SLEEP DETECTED! (Level 2) ⚠️{common_stats}{Colors.END}")
             elif level == 1:
-                print(f"{Colors.CYAN}[{timestamp}] 😴 NORMAL SLEEP DETECTED! (Level 1){Colors.END}")
+                print(f"{Colors.CYAN}[{timestamp}] 😴 NORMAL SLEEP DETECTED! (Level 1){common_stats}{Colors.END}")
             else:
                 if self.recovery_countdown_active:
                     time_left = max(0, RECOVERY_TIME_SEC - (time.time() - self.alert_start_time))
@@ -158,7 +235,7 @@ class DrowsinessDetector:
 
             self.last_terminal_output = time.time()
 
-    def _draw_display_status(self, image, img_w, ear_metric, mar_metric):
+    def _draw_display_status(self, image, img_w):
         """Draws the status box on the image."""
         
         status_color = (0, 255, 0)
@@ -174,11 +251,12 @@ class DrowsinessDetector:
             status_text = "LEVEL 1: NORMAL SLEEP"
             status_color = (0, 255, 255) 
         
+        # Keeping the visual text display on the frame for level information
         cv2.putText(image, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
         cv2.putText(image, f"EAR Count: {self.EAR_ALERT_COUNT}", (img_w - 220, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         cv2.putText(image, f"MAR Count: {self.MAR_ALERT_COUNT}", (img_w - 220, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        return self._run_drowsiness_logic(image)
+        return image
 
     def _run_drowsiness_logic(self, image):
         """Processes the frame for Drowsiness, returns metrics and annotated image."""
@@ -200,14 +278,6 @@ class DrowsinessDetector:
             face_detected = True
             landmarks = results.multi_face_landmarks[0].landmark
             
-            # Get bounding box for emotion detection later
-            x_min = min(int(lm.x * img_w) for lm in landmarks)
-            y_min = min(int(lm.y * img_h) for lm in landmarks)
-            x_max = max(int(lm.x * img_w) for lm in landmarks)
-            y_max = max(int(lm.y * img_h) for lm in landmarks)
-            face_coords = (x_min, y_min, x_max - x_min, y_max - y_min) # (x, y, w, h)
-
-            # Draw face mesh
             self.mp_drawing.draw_landmarks(
                 image=image,
                 landmark_list=results.multi_face_landmarks[0],
@@ -229,14 +299,27 @@ class DrowsinessDetector:
             avg_ear = (left_ear + right_ear) / 2.0
             
             if avg_ear < EAR_THRESHOLD:
+                # EYES ARE CLOSED (OR NEARLY CLOSED)
                 if self.EAR_CLOSED_START_TIME is None:
                     self.EAR_CLOSED_START_TIME = current_time
                 
-                if (current_time - self.EAR_CLOSED_START_TIME) >= EAR_DURATION_ALERT_SEC and not self.EAR_ALERT_CONFIRMED:
-                    self.EAR_ALERT_COUNT += 1
-                    self.EAR_ALERT_CONFIRMED = True
-                    ear_alert_instant = True
+                # Check for DURATION and trigger alarm/increment count
+                if (current_time - self.EAR_CLOSED_START_TIME) >= EAR_DURATION_ALERT_SEC:
+                    if not self.EAR_ALERT_CONFIRMED:
+                        self.EAR_ALERT_COUNT += 1
+                        self.EAR_ALERT_CONFIRMED = True
+                        ear_alert_instant = True
+                        # Immediately play the beep sound here!
+                        play_sound_alarm() # Uses preloaded audio
+                    elif self.SLEEPINESS_LEVEL >= 1:
+                        # Re-trigger beep on subsequent frames if currently drowsy (Level 1+)
+                        play_sound_alarm() # Uses preloaded audio
             else:
+                # EYES ARE OPEN (ABOVE THRESHOLD)
+                if self.EAR_CLOSED_START_TIME is not None:
+                    # *** MODIFICATION: Stop beep immediately when eyes open ***
+                    stop_sound_alarm()
+                
                 self.EAR_CLOSED_START_TIME = None
                 self.EAR_ALERT_CONFIRMED = False 
 
@@ -270,11 +353,12 @@ class DrowsinessDetector:
             self._print_terminal_alert(self.SLEEPINESS_LEVEL, avg_ear, mar)
             
         else:
-            # No face detected - reset all timers
+            # No face detected - reset all timers and stop sound
             self.EAR_CLOSED_START_TIME = None
             self.MAR_YAWN_START_TIME = None
             self.EAR_ALERT_CONFIRMED = False
             self.MAR_ALERT_CONFIRMED = False
+            stop_sound_alarm() # Stop any current beeping
             
             if self.recovery_countdown_active:
                 self.recovery_countdown_active = False 
@@ -283,135 +367,93 @@ class DrowsinessDetector:
             cv2.putText(image, "NO FACE DETECTED", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             
             if current_time - self.last_terminal_output >= TERMINAL_OUTPUT_INTERVAL:
-                print(f"{Colors.RED}[{datetime.now().strftime('%H:%M:%S')}] ❌ No face detected{Colors.END}")
+                print(f"{Colors.RED}[{dt.now().strftime('%H:%M:%S')}] ❌ No face detected{Colors.END}")
                 self.last_terminal_output = current_time
 
-        return image, face_detected, face_coords
+        return image, face_detected, face_coords 
 
+# --- DUMMY EEL FUNCTIONS (Kept) ---
+@eel.expose 
+def dummy_takecommand():
+    """Dummy function to satisfy any frontend dependencies that might call takecommand."""
+    return "unrecognized"
 
-# ==============================================================================
-# --- EMOTION DETECTION COMPONENTS (Load, Logic) ---
-# ==============================================================================
-
-# Setup (Load models outside the loop)
-try:
-    face_classifier = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-    # Assuming 'Models/emotion_model.h5' is the correct path structure
-    classifier = load_model(os.path.join('Models', 'emotion_model.h5')) 
-    emotion_labels = ['Angry','Disgust','Fear','Happy','Neutral', 'Sad', 'Surprise']
-except Exception as e:
-    print(f"{Colors.RED}ERROR: Could not load Emotion Detection models. Emotion feature will be skipped. Error: {e}{Colors.END}")
-    face_classifier = None
-    classifier = None
-
-def run_emotion_detection(frame, face_coords_drowsiness=None):
-    """
-    Runs emotion detection on the frame. If face_coords_drowsiness is provided, 
-    it uses that bounding box instead of running a full detectMultiScale.
-    """
+@eel.expose
+def dummy_start_conversation():
+    """Dummy function for starting conversation (now a no-op)."""
+    print("[Eel] Conversation feature removed. Ignoring start_conversation call.")
+    safe_eel_call("setMicState", "idle") 
     
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+@eel.expose
+def dummy_allCommands(query=""):
+    """Dummy function for text commands (now a no-op)."""
+    print(f"[Eel] Conversation feature removed. Ignoring command: {query}")
+    safe_eel_call("showHood") 
+
+# --- ALARM MANAGEMENT (Simplified) ---
+
+def handle_drowsiness_alarm(current_level, last_level):
+    """Handles alarm management (now primarily stopping the audio on recovery)."""
     
-    if face_classifier is None or classifier is None:
-        # Skip if models failed to load
-        return frame
-    
-    faces = []
-    
-    if face_coords_drowsiness:
-        # Use the face found by the Drowsiness Detector (more robust MediaPipe detection)
-        (x, y, w, h) = face_coords_drowsiness
-        faces.append((x, y, w, h))
-    else:
-        # Fallback to Haar cascade if MediaPipe failed or wasn't used
-        faces = face_classifier.detectMultiScale(
-            gray, 
-            scaleFactor=1.1, 
-            minNeighbors=4, 
-            minSize=(40, 40)
-        )
+    # 1. Deactivation/Recovery - This acts as a fallback for stopping sound
+    if current_level == 0 and last_level > 0:
+        stop_sound_alarm() 
+        safe_eel_call("DisplayMessage", "Alertness Recovered. Monitoring silently.")
 
-    if len(faces) > 0:
-        # Sort faces by area (w * h) in descending order and use the largest
-        if not face_coords_drowsiness:
-             faces = sorted(faces, key=lambda x: x[2] * x[3], reverse=True)
-             
-        (x, y, w, h) = faces[0]
-        
-        # Draw bounding box on the face for Emotion (Green/Yellow to differentiate Drowsiness mesh)
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 200, 255), 2) # Orange box
+    return 
 
-        # Prepare ROI for classification, handle potential out-of-bounds
-        roi_gray = gray[max(0, y):y + h, max(0, x):x + w]
-        
-        if roi_gray.size == 0:
-            return frame # Skip if ROI is invalid
-            
-        roi_gray = cv2.resize(roi_gray, (48, 48), interpolation=cv2.INTER_AREA)
-
-        if np.sum([roi_gray]) != 0:
-            roi = roi_gray.astype('float') / 255.0
-            roi = img_to_array(roi)
-            
-            roi = np.expand_dims(roi, axis=0)  
-            roi = np.expand_dims(roi, axis=-1) 
-
-            prediction = classifier.predict(roi, verbose=0)[0] 
-            label = emotion_labels[prediction.argmax()]
-            
-            # Display emotion label slightly above the box
-            label_position = (x, y - 10) 
-            cv2.putText(frame, f"Emotion: {label}", label_position, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-            
-    return frame
-
-# ==============================================================================
 # --- MAIN APPLICATION ENTRY POINT ---
-# ==============================================================================
 
 def start_integrated_detection():
-    """Initializes and runs the integrated video processing loop for Drowsiness and Emotion."""
+    """Initializes and runs the integrated video processing loop for Drowsiness only."""
     
-    # 1. Initialization
     detector = DrowsinessDetector()
     cap = cv2.VideoCapture(0)
 
-    # 2. Startup Messages
-    print(f"{Colors.BOLD}{Colors.BLUE}🚀 Starting Integrated Drowsiness + Emotion Detector 🚀{Colors.END}")
+    # *** NEW: PRELOAD AUDIO HERE ***
+    if not preload_audio(ALARM_SOUND_FILE):
+        print(f"{Colors.RED}FATAL: Audio alarm will not work. Check setup.{Colors.END}")
+
+    print(f"{Colors.BOLD}{Colors.BLUE}🚀 Starting Drowsiness Detector (MP3 Beep Alarm) 🚀{Colors.END}")
+    print(f"{Colors.RED}*** REQUIRES FFmpeg AND 'simpleaudio' installed! ***{Colors.END}")
+    print(f"{Colors.GREEN}Audio Alarm File: {ALARM_SOUND_FILE}{Colors.END}")
+    print(f"{Colors.GREEN}Alarm triggers after {EAR_DURATION_ALERT_SEC} seconds of eye closure.{Colors.END}")
     print(f"{Colors.GREEN}Press 'q' to quit the application{Colors.END}")
     print(f"{Colors.MAGENTA}{'='*60}{Colors.END}")
     
     if not cap.isOpened():
         print(f"{Colors.RED}ERROR: Could not open video stream (Webcam index 0).{Colors.END}")
         return
-
-    # 3. Main Video Processing Loop
+    
+    last_drowsiness_level = 0 # Track the level to detect escalation
+    
     while cap.isOpened():
         success, image = cap.read()
         if not success:
             continue
         
         try:
-            image = cv2.flip(image, 1) # Mirror the image
+            image = cv2.flip(image, 1) 
             
-            # --- 3a. Drowsiness Detection ---
-            # Returns: annotated image, whether a face was found, and the face's bounding box
+            # --- 1. Drowsiness Detection & Metrics (Now includes beep logic) ---
             processed_image, face_detected, face_coords = detector._run_drowsiness_logic(image)
+            current_level = detector.SLEEPINESS_LEVEL
             
-            # --- 3b. Emotion Detection ---
-            # Reuse the image and the face coordinates found by the Drowsiness Detector
-            processed_image = run_emotion_detection(processed_image, face_coords)
-            
-            # --- 3c. Final Drowsiness Status Display (Drawn over everything) ---
-            img_h, img_w, _ = processed_image.shape
-            cv2.rectangle(processed_image, (0, 0), (img_w, 80), (0, 0, 0), -1) # Clear top bar
-            detector._draw_display_status(processed_image, img_w, 0, 0) # Metrics args are placeholders here
+            # --- 2. ALARM MANAGEMENT LOGIC (Recovery only) ---
+            handle_drowsiness_alarm(current_level, last_drowsiness_level)
+            last_drowsiness_level = current_level
 
-            cv2.imshow('Integrated Driver Monitoring (Drowsiness & Emotion)', processed_image)
+            # --- 3. Final Status Display ---
+            img_h, img_w, _ = processed_image.shape
+            cv2.rectangle(processed_image, (0, 0), (img_w, 80), (0, 0, 0), -1) 
+            detector._draw_display_status(processed_image, img_w)
+
+            cv2.imshow('Driver Monitoring (Beep Alarm Only)', processed_image)
             
         except Exception as e:
             print(f"{Colors.RED}An error occurred during frame processing: {e}{Colors.END}")
-            # Optionally, break or continue based on error severity
+            # Ensure sound stops on crash
+            stop_sound_alarm()
             pass
 
         if cv2.waitKey(5) & 0xFF == ord('q'):
@@ -421,6 +463,7 @@ def start_integrated_detection():
     # 4. Cleanup
     cap.release()
     cv2.destroyAllWindows()
+    stop_sound_alarm() # Stop any active sound
     print(f"{Colors.BLUE}🔚 Integrated detector stopped{Colors.END}")
 
 if __name__ == '__main__':

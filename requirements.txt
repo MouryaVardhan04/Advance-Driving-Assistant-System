@@ -1,19 +1,14 @@
-# Core Vision and Data Processing
-opencv-python>=4.10.0.84 
-numpy>=1.26.0             
-tensorflow>=2.16.1        
-
-# UI and Web/Desktop Integration
-eel==0.16.0           
-pygame==2.5.0         
-
-# Speech Recognition and Synthesis
-pyttsx3==2.90             
-SpeechRecognition==3.1
-sounddevice==0.4.6    
-PyAudio==0.2.11          
-
-# Scientific and Data Utilities
-scipy==1.10.1             
-seaborn>=0.13.2           
-mediapipe>=0.10.14        
+opencv-python
+numpy
+tensorflow
+eel==0.16.0
+pyttsx3==2.90
+SpeechRecognition==3.10.0
+sounddevice==0.4.6
+scipy>=1.14.0
+pygame==2.5.0
+seaborn
+mediapipe
+pywhatkit
+pandas
+moviepy

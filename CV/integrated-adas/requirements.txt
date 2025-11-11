@@ -1,0 +1,12 @@
+numpy
+opencv-python
+matplotlib
+pandas
+pygame
+moviepy
+tensorflow
+keras
+scikit-learn
+dlib
+face-recognition
+```
