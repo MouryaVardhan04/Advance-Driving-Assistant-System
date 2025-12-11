@@ -12,3 +12,9 @@ mediapipe
 pywhatkit
 pandas
 moviepy
+ultralytics
+supervision
+imutils
+pydub
+simpleaudio
+matplotlib
