@@ -1,0 +1,271 @@
+ADAS Project Report
+===================
+
+Project: Advanced Driving Assistant System (ADAS)
+Repository: Advance-Drining-Assistant-System
+Author(s): (fill team / author names)
+Date: (fill date)
+
+1. Abstract
+-----------
+This project implements an integrated Advanced Driving Assistant System that monitors driver drowsiness, detects road signs, identifies potholes and pedestrians, and assists with lane detection. The system combines real-time computer-vision modules using MediaPipe Face Mesh and OpenCV with lightweight alarm and notification mechanisms. The drowsiness module triggers a low-latency audible alarm when eye closure is detected. The system is designed for prototype and research use, with modular code for each capability.
+
+2. Project Goals
+----------------
+- Detect driver drowsiness quickly and play an immediate alarm.
+- Recognize traffic/road signs for driving assistance.
+- Detect potholes and pedestrians as novelty safety features.
+- Provide lane detection assistance (lane line detection and perspective transform).
+- Keep modules modular for easy extension and dataset swapping.
+
+3. Summary of Modules
+---------------------
+A. Drowsiness Detection
+- Approach: Eye Aspect Ratio (EAR) using MediaPipe Face Mesh landmarks to compute eye openness from landmark distances.
+- Trigger: If EAR stays below a configured threshold for a short temporal window, an alarm audio (preloaded) plays instantly.
+- Key novelty: Preloaded audio buffer and immediate play/stop control for ultra-low latency. MAR (yawn detection) is removed to reduce false positives and simplify the logic.
+
+  Detailed description and implementation notes:
+  - Inputs: RGB camera frames (preferably 640x480 or 1280x720), face mesh landmarks returned by MediaPipe Face Mesh.
+  - Processing steps:
+    1. Detect face and extract face mesh landmarks per frame.
+    2. Compute EAR for left and right eyes using the six eye landmarks per eye.
+    3. Apply a short temporal smoothing filter (e.g., moving average over 3-5 frames) to reduce jitter.
+    4. If both-eye EAR average remains below EAR_THRESHOLD for EAR_DURATION_ALERT_SEC, trigger the preloaded alarm.
+    5. Stop the alarm immediately when EAR rises above the threshold.
+  - Outputs: alarm state (on/off), optional overlay text and timestamped logs for events.
+  - Tuning tips and failure modes:
+    - EAR threshold per-person varies; start around 0.22 and calibrate on sample footage.
+    - Very fast blink sequences can cause false triggers when duration threshold is too short; use 0.3-0.6s to balance latency vs false positives.
+    - Face rotation/partial occlusion may reduce landmark stability — consider adding a face-detection confidence check and fallback (no alarm if face not confidently detected).
+    - For low-light settings, apply brightness/CLAHE preprocessing or use IR illumination if available.
+
+B. Road Sign Detection
+- Approach: YOLO or a custom-trained classifier (models stored in `Models/`) running per-frame inference on the forward camera view.
+- Output: Detected sign class, confidence and bounding box overlays. Results can be mapped to navigation hints or logged for further processing.
+
+  Detailed description and implementation notes:
+  - Inputs: Forward-facing RGB frames; optionally region-of-interest (near horizon) crop for efficiency.
+  - Processing steps:
+    1. Preprocess frame (resize to model input, normalize).
+    2. Run detector and apply Non-Maximum Suppression (NMS).
+    3. Filter detections by confidence threshold and map class IDs to human-readable labels.
+    4. Optionally track detected signs across frames to increase robustness and reduce flicker.
+  - Outputs: list of detected signs [{class, confidence, bbox, timestamp}], overlay visualization, logs.
+  - Tuning tips and failure modes:
+    - Use a slightly lower confidence threshold (e.g., 0.3-0.4) and apply temporal smoothing to avoid missed detections.
+    - Small signs at a distance can be missed; ensure your training data contains scale variations.
+    - Balance model size vs FPS: tiny-YOLO or MobileNet-SSD are good starting points for CPU-only systems.
+
+C. Pothole Detection
+- Approach: Either a feature-based image pipeline or a supervised detector trained to classify/segment pothole patches seen in forward-facing frames.
+- Output: Detected pothole bounding boxes/heatmaps and alerts; detected events can be logged with frame/time for later analysis.
+
+  Detailed description and implementation notes:
+  - Inputs: Forward-facing frames, possibly a lower-resolution pipeline for efficiency.
+  - Processing steps:
+    1. Option A (classical): apply edge/texture filters and morphological operations to find irregular depressions; apply heuristic filters on size/shape.
+    2. Option B (ML): run a trained detector/segmenter on the frame or on sliding patches.
+    3. Score detections and raise alerts when confidence/size exceeds thresholds.
+  - Outputs: detection bounding boxes/segmentation masks, severity score, overlay and logs.
+  - Tuning tips and failure modes:
+    - Shadows and wet roads cause many false positives; include varied lighting in training and use temporal consistency checks.
+    - Potholes are highly variable — consider collecting a dedicated dataset from the target vehicle/camera to improve accuracy.
+
+D. Pedestrian Detection
+- Approach: YOLO or classical HOG/CNN-based detectors to find persons near or crossing the vehicle trajectory.
+- Output: Pedestrian bounding boxes, distances/priority scoring and warnings when pedestrians are in critical zones.
+
+  Detailed description and implementation notes:
+  - Inputs: Forward-facing frames or side-camera feeds for broader coverage.
+  - Processing steps:
+    1. Run detector on full frame or ROI; perform NMS and apply confidence filtering.
+    2. Estimate approximate distance using bounding-box size and camera calibration or a simple depth heuristic.
+    3. Prioritize and trigger warnings if pedestrians are within critical zones (path prediction intersects pedestrian bbox).
+  - Outputs: pedestrian detections, distance estimate, priority flag, overlays and logs.
+  - Tuning tips and failure modes:
+    - Occlusion and small pedestrians at a distance are common failure modes; combine detectors with motion cues to improve recall.
+    - Night-time detection is harder; use thermal/IR or increase exposure carefully to maintain detection accuracy.
+
+E. Lane Detection
+- Approach: Image thresholding, perspective (bird's-eye) transform, and Hough / polynomial lane-line fitting to extract lane geometry.
+- Output: Lane overlays drawn on the frame, optional curvature and vehicle offset estimates for driver assistance.
+
+  Detailed description and implementation notes:
+  - Inputs: Forward-facing camera (mounted near windshield), preferably with known camera intrinsics and mounting height.
+  - Processing steps:
+    1. Undistort frame (if camera calibration available) and convert to grayscale or color-thresholded binary image.
+    2. Apply perspective transform to obtain bird's-eye view for easier lane-line fitting.
+    3. Detect lane pixels (color thresholding + gradient) and fit polynomials to left and right lane lines.
+    4. Compute curvature and vehicle offset relative to lane center.
+  - Outputs: lane overlay, curvature (m), offset (m), and warnings if lane departure is detected.
+  - Tuning tips and failure modes:
+    - Painted lane visibility degrades with worn markings; augment with temporal smoothing and fallback heuristics.
+    - Curvy roads and intersections require robust windowing and line-tracking; consider deep-learning-based segmentation when classical methods fail.
+
+How these modules work from scratch (end-to-end description)
+---------------------------------------------------------
+This section describes the step-by-step process for taking a capability from raw data to an integrated, real-time module in this ADAS prototype. The steps below are applicable to each module (drowsiness, signs, potholes, pedestrians, lanes), with module-specific notes where relevant.
+
+1) Data collection and annotation
+- Capture representative video or image frames from the target camera configuration (same resolution, FOV, mounting). Include varied lighting, weather, and occlusion conditions.
+- Annotate frames: for detection tasks add bounding boxes and class labels (e.g., signs, potholes, pedestrians). For drowsiness create landmark-level ground truth or eye-open/eye-closed labels; for lane detection annotate lane lines or segmentation masks.
+
+2) Data preprocessing and augmentation
+- Normalize image sizes and color space; apply augmentations that mimic real-world variation (brightness/contrast shifts, blur, occlusion, horizontal flip where sensible).
+- For landmark-based modules (drowsiness), detect faces and align/crop regions to stabilize landmarks before computing EAR.
+
+3) Model selection and training (if using ML)
+- Choose an architecture based on latency/accuracy tradeoffs (e.g., lightweight YOLO-family for detection, small CNN for binary pothole classifier).
+- Train with proper train/validation/test splits. Use transfer learning where applicable and monitor mAP/accuracy and loss curves.
+- Export the trained model in a format that can be loaded at inference (ONNX, TensorFlow SavedModel, or model weights supported by the project).
+
+4) Inference pipeline (real-time integration)
+- Initialize camera capture and any hardware acceleration (OpenVINO, TensorRT, or GPU) if available.
+- Load models once at startup, and for drowsiness preload any short audio buffer used for alarms.
+- For each captured frame:
+  - Preprocess (resize, normalize) and run the relevant model or landmark extractor.
+  - Postprocess outputs: NMS for detectors, thresholding for EAR, poly-fit for lane lines.
+  - Fuse results: e.g., if a pothole and pedestrian are detected in overlapping regions, apply priority rules.
+  - Render overlays and compute any metrics (curvature, alarm state).
+
+5) Decision logic and actions
+- Drowsiness: use a short temporal window on EAR to avoid single-blink false alarms. If condition persists beyond the window, trigger the preloaded audio alarm and optionally a visual warning.
+- Other modules: apply confidence thresholds and optional temporal smoothing before raising an alert or logging an event.
+
+6) Logging, evaluation and feedback loop
+- Log frames and detection metadata for offline analysis. Evaluate performance on held-out test sets and iterate on thresholds and model improvements.
+- Record false positive/negative cases and curate them into an improved training set for model re-training.
+
+Module-specific notes
+- Drowsiness (EAR): EAR is computed from six eye landmarks per eye; it is lightweight and robust to small face shifts but requires face mesh stability. Preprocessing (face crop and mild smoothing) reduces jitter.
+- Road sign & Pedestrian (detection): Use a detector that balances speed and accuracy. Prioritize real-time speed for in-vehicle operation (e.g., tiny-YOLO variants or MobileNet-based SSDs).
+- Pothole (local anomaly): Pothole detection can be modeled as a detection or segmentation task. If data is limited, consider patch-based classifiers or one-class anomaly detection approaches.
+- Lane detection (geometric): A classical pipeline with thresholding + perspective transform is fast and explainable; deep-learning lane segmentation improves robustness on complex scenes but requires more labeled data.
+
+By following these end-to-end steps, each capability can be prototyped, evaluated, and integrated into the ADAS pipeline while keeping the system modular and testable.
+
+4. Novelties / Unique contributions (observed in project)
+--------------------------------------------------------
+- Low-latency drowsiness alarm: Audio preloading and direct immediate playback reduces alarm latency compared to reloading file per event.
+- Integrated multi-capability prototype: The repository integrates drowsiness, road-sign, pothole, pedestrian, and lane modules in a single workspace for easier experimentation and evaluation.
+- Lightweight, modular structure: Each capability lives in its own script (e.g., `Drowsiness` parts in `combined_script.py`), facilitating swapping datasets and models.
+- Low-light robustness (claimed): The drowsiness module includes preprocessing and landmark-based detection that can operate in lower-light conditions (empirical tuning may be required).
+- Simple audio-control API: play/stop alarm on condition change with minimal blocking.
+
+(If you have additional novel contributions please add them here.)
+
+5. Steps to complete / polish the project
+----------------------------------------
+Use this checklist when preparing a release or demonstration build:
+- [ ] Consolidate `combined_script.py` to a single final version (EAR-only drowsiness, no MAR, no level or counters) and run local smoke tests.
+- [ ] Install and pin required Python packages in `requirements.txt` and verify imports at runtime.
+- [ ] Replace placeholder model files or validate `Models/` content; add model license notes.
+- [ ] Add configuration options (thresholds and durations) to a single config file or CLI args.
+- [ ] Create a minimal GUI or web UI if required for demos (optional: use a lightweight frame + overlay window).
+- [ ] Add unit tests or integration tests for non-camera parts (e.g., EAR computation tests with synthetic landmarks).
+- [ ] Prepare dataset links, and document training/preprocessing steps for each model.
+- [ ] Run field tests at different lighting and driving conditions; log false positive/negative rates and tune thresholds.
+- [ ] Package demo instructions and an example recorded video for users without a camera.
+
+6. Working flow diagram (text / ASCII placeholder)
+-------------------------------------------------
+Place this in a design doc or convert to a visual diagram in draw.io / PowerPoint.
+
+[Camera] --> [Frame Capture] --> [Preprocessing] --> [Module Dispatcher]
+                                      |                 |    |    |
+                                      v                 v    v    v
+                                 Drowsiness         RoadSign  Pothole Pedestrian
+                                    |                 |        |       |
+                                    v                 v        v       v
+                              Alarm Control         Overlay   Overlay Overlay
+                                    |                 |        |       |
+                                    v                 v        v       v
+                               Logging/Alert       Logging  Logging  Logging
+                                    |
+                                    v
+                               (Optional) Save Frame / Send Notification
+
+7. Details of frameworks, libraries and tools used
+--------------------------------------------------
+Primary languages and runtime
+- Python 3.8+ (recommend 3.10 or 3.11)
+
+Key libraries seen in this repository
+- OpenCV (cv2) - image capture and drawing overlays.
+- MediaPipe - face mesh landmark extraction (used for EAR).
+- scipy.spatial.distance - for Euclidean distances used in EAR calculation.
+- numpy - numeric ops and arrays.
+- pydub - audio file handling and conversion (used to load mp3 to raw audio data).
+- simpleaudio - low-latency audio playback of preloaded buffers.
+- python-pptx - optional: used by `generate_ppt.py` to create slides.
+
+Development tools
+- FFmpeg (system dependency) - required by pydub for many audio formats (mp3 decoding), if not using WAV.
+
+8. Configuration and thresholds (suggested / default values used)
+----------------------------------------------------------------
+- EAR_THRESHOLD: ~0.20 - 0.26 (tune per camera and person). Lower values are stricter.
+- EAR_DURATION_ALERT_SEC: 0.3 - 1.0 seconds (short value yields immediate alarm; tune to avoid blinks)
+- Audio: Preload a short, clear alarm mp3 or wav (e.g., `asserts/alarm.mp3`). Prefer WAV if you want to avoid FFmpeg dependency.
+
+9. Dataset recommendations and placeholders
+------------------------------------------
+(Leave links space below for dataset sources you will add.)
+
+Recommended datasets for training / evaluation:
+- Drowsiness / driver monitoring datasets:
+  - NTHU Drowsy Driver Dataset (NTHU-DDD)  - (link placeholder)
+  - DROZY (or other drowsiness datasets) - (link placeholder)
+- Road sign detection datasets:
+  - GTSRB (German Traffic Sign Recognition Benchmark) - (link placeholder)
+  - LISA Traffic Sign Dataset - (link placeholder)
+- Pothole detection datasets:
+  - (Several public and research datasets exist; add link(s) here) - (link placeholder)
+- Pedestrian detection datasets:
+  - COCO (person class) - https://cocodataset.org/  - (add subset / link of interest)
+  - Caltech Pedestrian Dataset - (link placeholder)
+- Lane detection datasets:
+  - TuSimple Lane Detection - (link placeholder)
+  - CULane dataset - (link placeholder)
+
+Dataset links (fill these in):
+- NTHU Drowsy Driver Dataset: ___________________________
+- GTSRB: ___________________________
+- LISA: ___________________________
+- Pothole dataset: ___________________________
+- COCO: https://cocodataset.org/
+- TuSimple: ___________________________
+
+10. Evaluation metrics and testing suggestions
+----------------------------------------------
+- Drowsiness: measure detection latency (seconds from eye closure to alarm), false positive rate (blink misclassification), and false negative rate (missed closures).
+- Road sign: precision/recall per-class, mAP.
+- Pothole / Pedestrian: precision/recall, mAP, and localization accuracy.
+- Lane detection: IoU and lane line fitting error.
+
+11. File map (where to look in the repo)
+----------------------------------------
+- `combined_script.py` - integrated runtime and drowsiness logic (finalize to EAR-only simplified behavior).
+- `main.py` - main runner (check how pipeline is invoked).
+- `Drowsiness`-related functions are in `combined_script.py` and `Human_Detection.py`.
+- `Models/` - contains model files (check `sign_model.h5` and other binary assets).
+- `asserts/` - contains assets like alarm sound (verify filename).
+- `generate_ppt.py` - script to generate PPTX from the slide content (requires python-pptx).
+- `ADAS_presentation.txt` - text version of the presentation slides.
+
+12. Future work and extensions
+------------------------------
+- Replace MP3 with WAV for simpler playback (avoid FFmpeg dependency).
+- Add per-subject calibration to reduce false positives for drowsiness.
+- Add logging and offline analysis pipeline to compute metrics automatically.
+- Add model retraining pipelines and notebooks to reproduce experiments.
+- Improve low-light performance using IR camera or image enhancement preprocessing.
+
+13. Notes and next steps for you (actionable)
+---------------------------------------------
+- Review `combined_script.py` and confirm which version to keep; I can finalize EAR-only simplified logic and run local smoke tests if you allow me to run test commands here.
+- Fill in the team members, dates, and dataset link placeholders in section 9.
+- If you want, I can convert the ASCII working flow into a visual PNG or a slide diagram and insert it into the PPT generator.
+
+--- End of report ---

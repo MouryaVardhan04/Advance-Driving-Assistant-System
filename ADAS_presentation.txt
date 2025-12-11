@@ -1,0 +1,66 @@
+Advance Driving Assistant System (ADAS)
+- Real-time driver & road monitoring suite
+- Lightweight, OpenCV + MediaPipe-based modules
+- Low-latency alarms and visual overlays
+- Designed for in-vehicle deployment
+
+Group Members
+- Member 1: <Name> (Lead)
+- Member 2: <Name> (Vision)
+- Member 3: <Name> (Audio/Integration)
+- Replace placeholders with actual names
+
+Problem Statement & Real-time Need
+- Driver inattention, drowsiness and road hazards cause accidents
+- Existing systems are either expensive or offline/slow
+- Need for a compact, low-latency on-device solution
+- Detect and alert in real-time to reduce incidents
+
+How Our Project Resolves the Problem
+- Multi-module pipeline: drowsiness, road-signs, potholes, pedestrians, lanes
+- On-device processing with MediaPipe + OpenCV for low latency
+- Immediate audio alarm on danger and visual overlays for driver
+- Modular design — each module runs independently and can be tuned
+
+Drowsiness Module
+- Uses MediaPipe Face Mesh to compute EAR (eye aspect ratio)
+- EAR_THRESHOLD = 0.25 and configurable duration to trigger alarm
+- Preloads MP3 alarm and plays via simpleaudio for low-latency playback
+- Stops alarm immediately when eyes re-open; minimal on-frame UI
+ - Operates in low-light conditions: adaptive preprocessing and robust landmark tracking improve detection in dim scenes
+
+Road-sign Module
+- Custom detector (or pre-trained sign model) recognizes traffic signs
+- Displays sign class and confidence overlay on frame above conf 75%
+- Can be extended with geo-fencing or sign-specific rules
+- Lightweight inference for near real-time performance
+
+Novelty 1 — Pothole Detection
+- Vision-based pothole detector using image processing + learned model
+- Highlights road-surface defects on the forward camera feed
+- Helps in proactive maintenance and driver awareness
+- Works in tandem with lane detection for robust localization
+
+Novelty 2 — Pedestrian Detection
+- Real-time human detection module using lightweight detector
+- Prioritizes close-range pedestrians and movement cues
+- Generates visual warnings and can trigger audio alerts
+- Optimized for low false-positive rate in traffic scenarios
+
+Novelty 3 — Lane Detection
+- Edge and Hough-based lane boundary detection with perspective transform
+- Provides lane overlay + drift warnings
+- Works with road-sign & pothole modules to fuse scene context
+- Runtime-optimized to keep frame processing fast
+
+Limitations
+- Performance depends on camera quality and lighting conditions
+- False positives possible under occlusion / extreme angles
+- Audio playback latency depends on OS/driver (we preload to reduce it)
+- Further model pruning may be needed for low-power devices
+
+Conclusion & Next Steps
+- Integrated ADAS prototype with immediate, practical safety benefits
+- Drowsiness alarm, sign recognition, pothole/pedestrian/lane modules work together
+- Next: mobile/Raspberry Pi deployments, model compression, field tests
+- Open for feature tuning and integration with vehicle CAN data

@@ -24,7 +24,7 @@ class PerspectiveTransformation:
         self.M = cv2.getPerspectiveTransform(self.src, self.dst)
         self.M_inv = cv2.getPerspectiveTransform(self.dst, self.src)
 
-    def forward(self, img, img_size=(1280, 720), flags=cv2.INTER_LINEAR):
+    def forward(self, img, img_size=(1280, 720), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0)):
         """ Take a front view image and transform to top view
 
         Parameters:
@@ -35,9 +35,10 @@ class PerspectiveTransformation:
         Returns:
             Image (np.array): Top view image
         """
-        return cv2.warpPerspective(img, self.M, img_size, flags=flags)
+        # Use BORDER_CONSTANT by default to avoid BORDER_WRAP artifacts
+        return cv2.warpPerspective(img, self.M, img_size, flags=flags, borderMode=borderMode, borderValue=borderValue)
 
-    def backward(self, img, img_size=(1280, 720), flags=cv2.INTER_LINEAR):
+    def backward(self, img, img_size=(1280, 720), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0)):
         """ Take a top view image and transform it to front view
 
         Parameters:
@@ -48,4 +49,5 @@ class PerspectiveTransformation:
         Returns:
             Image (np.array): Front view image
         """
-        return cv2.warpPerspective(img, self.M_inv, img_size, flags=flags)
+        # Use BORDER_CONSTANT by default to avoid BORDER_WRAP artifacts
+        return cv2.warpPerspective(img, self.M_inv, img_size, flags=flags, borderMode=borderMode, borderValue=borderValue)

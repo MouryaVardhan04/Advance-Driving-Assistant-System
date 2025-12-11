@@ -3,6 +3,7 @@ import numpy as np
 import mediapipe as mp
 from scipy.spatial import distance as dist
 import time
+from fps_control import FrameTimer
 from datetime import datetime as dt 
 import os 
 # import pyttsx3 # REMOVED: No more text-to-speech
@@ -15,10 +16,6 @@ import simpleaudio as sa
 import eel 
 import requests 
 
-# ====================================================================
-# 🔥 CRITICAL: Removed GEMINI API Key and URL constants! 🔥
-# ====================================================================
-
 # --- GLOBAL STATE ---
 CURRENT_PLAYBACK = None 
 PRELOADED_AUDIO = None # Global to store decoded audio
@@ -29,8 +26,8 @@ EAR_THRESHOLD = 0.25
 MAR_THRESHOLD = 0.6       
 TERMINAL_OUTPUT_INTERVAL = 2  
 # *** MODIFIED FOR INSTANT RESPONSE (0.5 seconds) ***
-EAR_DURATION_ALERT_SEC = 1.5
-MAR_DURATION_ALERT_SEC = 4.0 
+EAR_DURATION_ALERT_SEC = 1.0
+MAR_DURATION_ALERT_SEC = 2.0 
 RECOVERY_TIME_SEC = 20.0 
 EAR_ALERT_LIMIT_L1 = 3  
 MAR_ALERT_LIMIT_L1 = 2  
@@ -410,6 +407,17 @@ def start_integrated_detection():
     detector = DrowsinessDetector()
     cap = cv2.VideoCapture(0)
 
+    # Frame timer: sync to camera's reported FPS if available, otherwise default to 30
+    source_fps = cap.get(cv2.CAP_PROP_FPS)
+    try:
+        source_fps = float(source_fps)
+    except Exception:
+        source_fps = 30.0
+    if not source_fps or source_fps <= 1.0:
+        source_fps = 30.0
+    frame_timer = FrameTimer(source_fps=source_fps, allow_frame_drop=True)
+    frame_timer.start()
+
     # *** NEW: PRELOAD AUDIO HERE ***
     if not preload_audio(ALARM_SOUND_FILE):
         print(f"{Colors.RED}FATAL: Audio alarm will not work. Check setup.{Colors.END}")
@@ -449,6 +457,12 @@ def start_integrated_detection():
             detector._draw_display_status(processed_image, img_w)
 
             cv2.imshow('Driver Monitoring (Beep Alarm Only)', processed_image)
+            # Sync presentation to camera/video FPS (may drop frames if processing is slow)
+            try:
+                frame_timer.wait_for_frame()
+            except Exception:
+                # If timer fails for any reason, continue without blocking
+                pass
             
         except Exception as e:
             print(f"{Colors.RED}An error occurred during frame processing: {e}{Colors.END}")

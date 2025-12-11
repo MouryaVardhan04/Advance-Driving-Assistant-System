@@ -2,6 +2,7 @@ import time
 import cv2
 import numpy as np
 import pygame
+from fps_control import FrameTimer
 import supervision as sv
 from ultralytics import YOLO
 
@@ -79,6 +80,17 @@ font = pygame.font.SysFont("Consolas", FONT_SIZE)
 cap = cv2.VideoCapture(VIDEO_PATH)
 if not cap.isOpened():
     raise SystemExit(f"Could not open video file {VIDEO_PATH}")
+
+# Create frame timer based on the video's native FPS so playback uses original speed
+source_fps = cap.get(cv2.CAP_PROP_FPS)
+try:
+    source_fps = float(source_fps)
+except Exception:
+    source_fps = 30.0
+if not source_fps or source_fps <= 1.0:
+    source_fps = 30.0
+frame_timer = FrameTimer(source_fps=source_fps, allow_frame_drop=True)
+frame_timer.start()
 
 # Optionally compute frame scaling to fit window while preserving aspect ratio
 def scale_frame_to_window(frame, window_size):
@@ -163,8 +175,12 @@ while running:
 
     pygame.display.flip()
 
-    # limit to ~30-60hz (adjust as required)
-    clock.tick(60)
+    # Present frames according to source FPS (preserves original speed); may drop frames if processing is slow
+    try:
+        frame_timer.wait_for_frame()
+    except Exception:
+        # Fallback to capping loop to avoid busy-waiting
+        clock.tick(60)
 
 # Cleanup
 cap.release()

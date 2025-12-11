@@ -4,6 +4,7 @@ import pandas as pd
 import pygame
 from keras.models import load_model
 import time # <--- Added for integration
+from fps_control import FrameTimer
 
 # Pothole/YOLO Imports
 import supervision as sv
@@ -233,7 +234,7 @@ def overlay_sign_visual(frame, class_index, name, confidence, asserts_dir='asser
         # On error, do nothing (no overlay)
         return frame
 
-def run_sign_lane(input_path):
+def run_sign_lane(input_path, speed=2):
     # Initialize detectors (LaneLines handles Pothole initialization)
     lane_detector = FindLaneLines()
     sign_detector = RoadSignDetector()
@@ -247,6 +248,19 @@ def run_sign_lane(input_path):
     # Get video properties
     VIDEO_WIDTH = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     VIDEO_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Determine source FPS and create a frame timer to preserve original speed
+    source_fps = cap.get(cv2.CAP_PROP_FPS)
+    try:
+        source_fps = float(source_fps)
+    except Exception:
+        source_fps = 30.0
+    if not source_fps or source_fps <= 1.0:
+        source_fps = 30.0
+    # speed parameter multiplies playback rate (speed=2 => 2x)
+    effective_fps = source_fps * max(1, speed)
+    frame_timer = FrameTimer(source_fps=effective_fps, allow_frame_drop=True)
+    frame_timer.start()
 
     print("\n[SignLane] --- Starting Integrated Video Processing ---")
 
@@ -272,6 +286,10 @@ def run_sign_lane(input_path):
             # End of video or error
             break
         
+        # We advance one decoded frame per loop; frame_timer controls presentation
+        if speed < 1:
+            speed = 1
+
         frame_count += 1
         
         # Convert BGR to RGB (OpenCV uses BGR, moviepy uses RGB)
@@ -306,6 +324,11 @@ def run_sign_lane(input_path):
         frame_pygame = pygame.surfarray.make_surface(frame_display.swapaxes(0, 1))
         screen.blit(frame_pygame, (0, 0))
         pygame.display.flip()
+        # Wait so the frame is presented according to (source_fps * speed)
+        try:
+            frame_timer.wait_for_frame()
+        except Exception:
+            pass
 
     cap.release()
     pygame.quit()
